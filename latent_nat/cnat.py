@@ -125,7 +125,7 @@ class QuantizeNATDecoder(VNATDecoder):
             tgt_tokens=tgt
         )
         pred_embed = self.posterior.forward(indices=outputs.token)
-        if self.is_schedule_z:
+        if self.is_schedule_z and out is not None:
             ref_embed = out["code_st"]
             sample = self.sampler.forward(
                 targets=out["tgt"], mask=~decoder_padding_mask,
