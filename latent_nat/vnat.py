@@ -96,7 +96,7 @@ class VNATDecoder(GlancingTransformerDecoder):
             self,
             inputs,
             decoder_padding_mask,
-            pos,
+            pos=None,
             encoder_out=None,
             early_exit=None,
             tgt_tokens=None,
