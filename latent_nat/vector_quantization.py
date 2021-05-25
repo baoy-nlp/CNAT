@@ -1,51 +1,43 @@
 import torch
 from torch.autograd import Function
 
-from .code import CategoricalEmbedding as Code
-from .code import LearnableCategoricalEmbedding as LearnCode
-
 INF = 1e-5
 
 
-class SoftCode(LearnCode):
-    """
-    search the nearest vector by dot-product
-    """
-
-    def forward(self, z_e_x):
-        """
-        :param z_e_x: batch_size, sequence_length, hidden_dim
-        :return:
-        """
-        code = self.embedding.weight
-        if not self.update:
-            code = code.detach()
-        score = dot_product(z_e_x, code)
-        indices = score.max(dim=-1)[1]
-        return score, indices
-
-    def straight_through(self, z_e_x):
-        z_st, indices = straight_through(z_e_x, self.embedding.weight.detach())
-        z_st_bar = self.embedding.weight.index_select(dim=0, index=indices)
-        z_st_bar = z_st_bar.view_as(z_e_x)
-        return z_st, z_st_bar, indices.view(*z_st.size()[:-1]), self.forward(z_e_x)[0]
-
-
-def dot_product(inputs, codebook):
+def nearest_search(inputs, codebook):
     embedding_size = codebook.size(1)
+    inputs_size = inputs.size()
     inputs_flatten = inputs.view(-1, embedding_size)
-    score = inputs_flatten @ (codebook.t())
-    score = score.view(inputs.size(0), inputs.size(1), -1)
-    return score
+
+    codebook_sqr = torch.sum(codebook ** 2, dim=1)
+    inputs_sqr = torch.sum(inputs_flatten ** 2, dim=1, keepdim=True)
+
+    # Compute the distances to the codebook
+    distances = torch.addmm(codebook_sqr + inputs_sqr,
+                            inputs_flatten, codebook.t(), alpha=-2.0, beta=1.0)
+
+    return distances
 
 
-class Search(Function):
+class VectorQuantization(Function):
     @staticmethod
     def forward(ctx, inputs, codebook):
         with torch.no_grad():
-            score = dot_product(inputs, codebook)
-            indices = torch.max(score, dim=-1)[1]
+            embedding_size = codebook.size(1)
+            inputs_size = inputs.size()
+            inputs_flatten = inputs.view(-1, embedding_size)
+
+            codebook_sqr = torch.sum(codebook ** 2, dim=1)
+            inputs_sqr = torch.sum(inputs_flatten ** 2, dim=1, keepdim=True)
+
+            # Compute the distances to the codebook
+            distances = torch.addmm(codebook_sqr + inputs_sqr,
+                                    inputs_flatten, codebook.t(), alpha=-2.0, beta=1.0)
+
+            _, indices_flatten = torch.min(distances, dim=1)
+            indices = indices_flatten.view(*inputs_size[:-1])
             ctx.mark_non_differentiable(indices)
+
             return indices
 
     @staticmethod
@@ -56,10 +48,10 @@ class Search(Function):
                            'if you want a straight-through estimator of the gradient.')
 
 
-class StraightThrough(Function):
+class VectorQuantizationStraightThrough(Function):
     @staticmethod
     def forward(ctx, inputs, codebook):
-        indices = search(inputs, codebook)
+        indices = vq_search(inputs, codebook)
         indices_flatten = indices.view(-1)
         ctx.save_for_backward(indices_flatten, codebook)
         ctx.mark_non_differentiable(indices_flatten)
@@ -89,11 +81,25 @@ class StraightThrough(Function):
         return grad_inputs, grad_codebook
 
 
-search = Search.apply
-straight_through = StraightThrough.apply
+def search(inputs, codebook):
+    embedding_size = codebook.size(1)
+    inputs_size = inputs.size()
+    inputs_flatten = inputs.view(-1, embedding_size)
+    score = inputs_flatten @ (codebook.t())
+    _, indices_flatten = score.max(dim=1)
+    indices = indices_flatten.view(*inputs_size[:-1])
+    return indices
 
-CODE_CLS = {
-    "code": Code,
-    "learn-code": LearnCode,
-    "soft-code": SoftCode
-}
+
+def search_st(inputs, codebook):
+    indices = search(inputs, codebook)
+    indices_flatten = indices.view(-1)
+
+    codes_flatten = torch.index_select(codebook, dim=0, index=indices_flatten)
+    codes = codes_flatten.view_as(inputs)
+
+    return codes, indices_flatten
+
+
+vq_search = VectorQuantization.apply
+vq_st = VectorQuantizationStraightThrough.apply

@@ -19,11 +19,6 @@ from fairseq.modules import DynamicCRF
 from fairseq.modules.dynamic_crf_layer import logsumexp
 
 
-class WrapperCRF(DynamicCRF):
-    def __init__(self, num_embedding, low_rank=32, beam_size=64, **unused):
-        super().__init__(num_embedding, low_rank, beam_size)
-
-
 class CRF(nn.Module):
     def __init__(self, num_embedding: int, beam_size=64, batch_first=True, **unused):
         super().__init__()
@@ -87,7 +82,7 @@ class CRF(nn.Module):
         crf_nll = (crf_nll / masks.type_as(crf_nll).sum(-1)).mean()
         if not log_prob and self.training:
             return {
-                "vq-L1": {
+                "CRF": {
                     "loss": crf_nll,
                     # "out": log_prob,
                     "tgt": targets,
@@ -104,7 +99,7 @@ class CRF(nn.Module):
         z = forward_tensor + backward_tensor
         log_prob = z - logsumexp(z, dim=-1)[:, :, None]
         return {
-            "vq-L1": {
+            "CRF": {
                 "loss": crf_nll,
                 "out": log_prob,
                 "tgt": targets,
@@ -266,6 +261,11 @@ class CRF(nn.Module):
         return emissions, masks, targets
 
 
+class WrapperCRF(DynamicCRF):
+    def __init__(self, num_embedding, low_rank=32, beam_size=64, **unused):
+        super().__init__(num_embedding, low_rank, beam_size)
+
+
 class BiaffineCRF(nn.Module):
     """
     NUM_TAGS * NUM_HIDDEN
@@ -332,7 +332,7 @@ class BiaffineCRF(nn.Module):
         crf_nll = (crf_nll / masks.type_as(crf_nll).sum(-1)).mean()
         if not log_prob and self.training:
             return {
-                "vq-L1": {
+                "CRF": {
                     "loss": crf_nll,
                     "tgt": targets,
                     "mask": masks,
@@ -348,7 +348,7 @@ class BiaffineCRF(nn.Module):
         z = forward_tensor + backward_tensor
         log_prob = z - logsumexp(z, dim=-1)[:, :, None]
         return {
-            "vq-L1": {
+            "CRF": {
                 "loss": crf_nll,
                 "out": log_prob,
                 "tgt": targets,
@@ -526,59 +526,56 @@ class BiaffineCRF(nn.Module):
         return inputs, emissions, masks, targets
 
 
-def crf_training(crf_layer, inputs, word_ins_out, tgt_tokens, word_ins_mask, log_prob=True, use_emission=False):
+def crf_training(crf_layer, inputs, emission, tgt_tokens, forward_mask, log_prob=True, include_emission_loss=False):
     if hasattr(crf_layer, "extract_feature"):
         extract_feature = crf_layer.extract_feature
         if isinstance(crf_layer, BiaffineCRF):
-            loss_ret = extract_feature(
-                inputs=inputs, emissions=word_ins_out, targets=tgt_tokens, masks=word_ins_mask, log_prob=log_prob
+            # include an extra encoding process for inputs
+            ret = extract_feature(
+                inputs=inputs, emissions=emission, targets=tgt_tokens, masks=forward_mask, log_prob=log_prob
             )
         else:
-            loss_ret = extract_feature(
-                emissions=word_ins_out, targets=tgt_tokens, masks=word_ins_mask, log_prob=log_prob
+            ret = extract_feature(
+                emissions=emission, targets=tgt_tokens, masks=forward_mask, log_prob=log_prob
             )
     else:
-        loss_ret = {}
-        if isinstance(crf_layer, BiaffineCRF):
-            crf_nll = -crf_layer(inputs=inputs, emissions=word_ins_out, targets=tgt_tokens, masks=word_ins_mask)
-        else:
-            crf_nll = -crf_layer(emissions=word_ins_out, targets=tgt_tokens, masks=word_ins_mask)
-        crf_nll = (crf_nll / word_ins_mask.type_as(crf_nll).sum(-1)).mean()
-        loss_ret['vq-L1'] = {
+        ret = {}
+        crf_nll = -crf_layer(emissions=emission, targets=tgt_tokens, masks=forward_mask)
+        crf_nll = (crf_nll / forward_mask.type_as(crf_nll).sum(-1)).mean()
+        ret['CRF'] = {
             'loss': crf_nll,
             'factor': 1.0
         }
-    loss_ret['out'] = word_ins_out
-    if use_emission:
-        loss_ret["crf-emission"] = {
-            "out": word_ins_out,
+    ret['out'] = emission  # used for schedule sampling
+    if include_emission_loss:
+        ret["CRF-emission"] = {
+            "out": emission,
             "tgt": tgt_tokens,
-            "mask": word_ins_mask,
+            "mask": forward_mask,
             "factor": 0.5
         }
-    elif 'log_prob' in loss_ret['vq-L1']:
-        loss_ret['out'] = loss_ret['vq-L1']['log_prob']
+    elif 'log_prob' in ret:
+        ret['out'] = ret['log_prob']
+    return ret
 
-    return loss_ret
 
-
-def crf_inference(crf_layer, inputs, word_ins_out, word_ins_mask):
+def crf_inference(crf_layer, inputs, emission, forward_mask):
     if isinstance(crf_layer, BiaffineCRF):
         return crf_layer.forward_decoder(
             inputs=inputs,
-            emissions=word_ins_out,
-            masks=word_ins_mask
+            emissions=emission,
+            masks=forward_mask
         )
     else:
         return crf_layer.forward_decoder(
-            emissions=word_ins_out,
-            masks=word_ins_mask
+            emissions=emission,
+            masks=forward_mask
         )
 
 
 def build_crf_layer(args):
     return CRF_CLS[getattr(args, "crf_cls", "DCRF")](
-        num_embedding=args.vq_num,
+        num_embedding=args.num_cdes,
         low_rank=getattr(args, "crf_lowrank_approx", 32),
         beam_size=getattr(args, "crf_beam_approx", 64),
         num_head=getattr(args, "crf_num_head", 8),
@@ -588,6 +585,5 @@ def build_crf_layer(args):
 
 CRF_CLS = {
     "DCRF": WrapperCRF,
-    "CRF": CRF,
     "BCRF": BiaffineCRF
 }

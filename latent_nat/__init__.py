@@ -1,11 +1,15 @@
-# import cnat.vq_nat
-import cnat.vq_vae
-# import cnat.vector_nat
-from nat_base import generic_loss
-from nat_base import nat_task
+from latent_nat import awesome_nat
+from latent_nat import awesome_nat_loss
+from latent_nat import cnat
+from latent_nat import glat
+from latent_nat import nat_task
+from latent_nat import vnat
+
 __all__ = [
-    "generic_loss",
+    "awesome_nat_loss",
     "nat_task",
-    # "vector_nat",
-    "vq_vae",
+    "glat",
+    "awesome_nat",
+    "vnat",
+    "cnat"
 ]
