@@ -87,7 +87,7 @@ class QuantizeNATDecoder(VNATDecoder):
                             help="use for exponential moving average")
         parser.add_argument("--vq-ema", action="store_true")
         parser.add_argument("--vq-dropout", type=float)
-        parser.add_argument("--vq-share-input-output-embed", action="store_true", default=False)
+        parser.add_argument("--vq-share-input-output-embed", action="store_true")
         parser.add_argument("--vq-schedule-ratio", type=float, default=0.0)
 
         # parameter for predictor
