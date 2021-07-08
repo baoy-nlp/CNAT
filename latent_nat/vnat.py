@@ -7,6 +7,7 @@ from fairseq.models import register_model, register_model_architecture
 from .glat import GlancingTransformer, GlancingTransformerDecoder, init_bert_params
 from .utils import GateNet, SelfATTEncoder, GaussianVariable, GlobalNames
 
+# to support different version of fairseq
 try:
     from fairseq.models.transformer import EncoderOut
 except ImportError:
@@ -85,7 +86,7 @@ class VNATDecoder(GlancingTransformerDecoder):
         ) if args.combine_func == "residual" else None
 
     @staticmethod
-    def add_args(parser):
+    def add_args(parser, key=None):
         parser.add_argument("--latent-factor", type=float, default=1.0)
         parser.add_argument("--latent-dim", type=int, default=200)
         parser.add_argument("--latent-layers", type=int, default=5)
@@ -94,7 +95,7 @@ class VNATDecoder(GlancingTransformerDecoder):
 
     def _extract_features(
             self,
-            inputs,
+            x,
             decoder_padding_mask,
             pos=None,
             encoder_out=None,
@@ -102,51 +103,47 @@ class VNATDecoder(GlancingTransformerDecoder):
             tgt_tokens=None,
             **unused,
     ):
+
+        z, z_ret = self.forward_latent(encoder_out, tgt_tokens, x, decoder_padding_mask=decoder_padding_mask)
+
+        # integrating the latent variable information
+        feats = self.forward_combine(x, z)
+
         if tgt_tokens is not None and self.glat_training and self.training:
             # Glancing Training
-            z, z_ret = self.forward_latent(encoder_out, tgt_tokens, inputs, decoder_padding_mask=decoder_padding_mask)
-
-            # integrating the latent variable information
-            feat = self.forward_combine(inputs, z)
-
-            # first decoding pass
-            outputs, first_pass_ret = self._forward_decoding(feat, decoder_padding_mask, encoder_out, early_exit)
+            with torch.no_grad():
+                decoder_outputs, ret = self._forward_decoding(feats, decoder_padding_mask, encoder_out, early_exit)
 
             # glancing for second pass
             glancing_inputs, predict, glancing_mask = self.glancing(
-                features=outputs, targets=tgt_tokens, mask=decoder_padding_mask, ratio=self.sampling_ratio,
-                inputs=inputs
+                features=decoder_outputs, targets=tgt_tokens, mask=decoder_padding_mask, ratio=self.sampling_ratio,
+                inputs=x
             )
 
             # integrating the latent variable information
-            feat = self.forward_combine(glancing_inputs, z)
+            feats = self.forward_combine(glancing_inputs, z)
 
             # second decoding pass
-            features, ret = self._forward_decoding(feat, decoder_padding_mask, encoder_out, early_exit)
+            features, ret = self._forward_decoding(feats, decoder_padding_mask, encoder_out, early_exit)
 
-            ret[GlobalNames.INPUT] = inputs
-            ret[GlobalNames.FEATURES] = outputs
+            ret[GlobalNames.FEATURES] = decoder_outputs
             ret[GlobalNames.PREDICTS] = predict
             ret[GlobalNames.GLANCING_INPUTS] = glancing_inputs
             ret[GlobalNames.GLANCING_MASK] = glancing_mask
-
-            ret.update(z_ret)
-            return features, ret
         else:
-            z, z_ret = self.forward_latent(encoder_out, tgt_tokens, inputs, decoder_padding_mask=decoder_padding_mask)
-            feats = self.forward_combine(inputs, z)
-            # decoding only one pass during inference
+
             features, ret = self._forward_decoding(feats, decoder_padding_mask, encoder_out, early_exit)
-            ret[GlobalNames.INPUT] = inputs
             ret[GlobalNames.FEATURES] = features
-            ret.update(z_ret)
-            return features, ret
+
+        ret[GlobalNames.INPUT] = x
+        ret.update(z_ret)
+        return features, ret
 
     def forward_latent(self, encoder_out: EncoderOut, tgt_tokens=None, inputs=None, **unused):
-        prior_out = self.prior.forward(inputs=encoder_out.encoder_out, mask=~encoder_out.encoder_padding_mask)
+        prior_out = self.prior(inputs=encoder_out.encoder_out, mask=~encoder_out.encoder_padding_mask)
         inner_states = {GlobalNames.PRI_RET: prior_out}
-
         z = prior_out[GlobalNames.REC]  # batch_size, hidden
+
         if tgt_tokens is not None:
             y_mask = tgt_tokens.ne(self.padding_idx)
             y_embed = self.forward_embedding(tgt_tokens)[0]
@@ -202,7 +199,7 @@ class VAEPrior(nn.Module):
         else:
             h_f = inputs.mean(dim=1)
 
-        return self.latent.forward(inputs=h_f)
+        return self.latent(inputs=h_f)
 
 
 class VAEPosterior(nn.Module):
@@ -239,7 +236,7 @@ class VAEPosterior(nn.Module):
 
         # concatenate x and y
         h = torch.cat([h_f, h_e], dim=-1)
-        return self.latent.forward(inputs=h)
+        return self.latent(inputs=h)
 
 
 def base_architecture(args):

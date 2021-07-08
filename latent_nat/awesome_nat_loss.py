@@ -11,7 +11,8 @@ class GenericNATCriterion(LabelSmoothedDualImitationCriterion):
         include the accuracy if needed
     """
 
-    def _compute_acc(self, tgt, out=None, mask=None, pred=None, name="acc"):
+    @classmethod
+    def _compute_acc(cls, tgt, out=None, mask=None, pred=None, name="acc"):
         if out is None and pred is None:
             correct, totals = tgt.new_tensor(0), tgt.new_tensor(0)
         else:
@@ -30,7 +31,7 @@ class GenericNATCriterion(LabelSmoothedDualImitationCriterion):
                 totals = tgt.new_tensor(tgt.size(0))
             correct = indicate.sum()
         if totals.item() > 0:
-            acc = correct / totals + 1e-3
+            acc = correct / (totals + 1e-3)
         else:
             acc = tgt.new_tensor(0)
         return {"name": name, "correct": correct, "count": totals, "acc": acc}
@@ -117,21 +118,14 @@ class GenericNATCriterion(LabelSmoothedDualImitationCriterion):
     @staticmethod
     def reduce_metrics(logging_outputs) -> None:
         """Aggregate logging outputs from data parallel training."""
-        sample_size = utils.item(
-            sum(log.get("sample_size", 0) for log in logging_outputs)
-        )
+
+        sample_size = utils.item(sum(log.get("sample_size", 0) for log in logging_outputs))
         loss = utils.item(sum(log.get("loss", 0) for log in logging_outputs))
         nll_loss = utils.item(sum(log.get("nll_loss", 0) for log in logging_outputs))
 
-        metrics.log_scalar(
-            "loss", loss / sample_size / math.log(2), sample_size, round=3
-        )
-        metrics.log_scalar(
-            "nll_loss", nll_loss / sample_size / math.log(2), sample_size, round=3
-        )
-        metrics.log_derived(
-            "ppl", lambda meters: utils.get_perplexity(meters["loss"].avg)
-        )
+        metrics.log_scalar("loss", loss / sample_size / math.log(2), sample_size, round=3)
+        metrics.log_scalar("nll_loss", nll_loss / sample_size / math.log(2), sample_size, round=3)
+        metrics.log_derived("ppl", lambda meters: utils.get_perplexity(meters["loss"].avg))
 
         for key in logging_outputs[0]:
             if key[-5:] == "-loss":

@@ -77,7 +77,7 @@ def load_pretrained_model(args):
 @register_model("awesome_nat")
 class AwesomeNAT(NATransformerModel):
     """
-    include the implementation of relative-position based model
+    wrap the NAT model with the implementation of relative-position-based attention
     """
 
     @staticmethod
@@ -663,7 +663,10 @@ class NATDecoder(NATransformerDecoder):
         if positions is not None and add_position:
             x += positions
         x = self.dropout_module(x)
-        decoder_padding_mask = prev_output_tokens.eq(self.padding_idx)
+        if self.padding_idx is not None:
+            decoder_padding_mask = prev_output_tokens.eq(self.padding_idx)
+        else:
+            decoder_padding_mask = prev_output_tokens.eq(-1)
         return x, decoder_padding_mask, positions
 
     def forward_length_prediction(self, length_out, encoder_out, tgt_tokens=None, use_ref_len=False, beam_size=1):

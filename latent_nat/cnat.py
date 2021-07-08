@@ -4,9 +4,9 @@ import torch
 import torch.nn as nn
 from fairseq.models import register_model, register_model_architecture
 
+from latent_nat.glat import ReferenceSampler
 from latent_nat.predictor import CRFPredictor
-# from latent_nat.predictor import CRFPredictor2 as CRFPredictor
-from latent_nat.utils import GlobalNames, ReferenceSampler
+from latent_nat.utils import GlobalNames
 from latent_nat.vector_quantization import vq_st, vq_search
 from latent_nat.vnat import VNATDecoder, VariationalNAT, init_bert_params
 
@@ -75,24 +75,25 @@ class QuantizeNAT(VariationalNAT):
 class QuantizeNATDecoder(VNATDecoder):
     def __init__(self, args, dictionary, embed_tokens, no_encoder_attn=False):
         super().__init__(args, dictionary, embed_tokens, no_encoder_attn)
-        self.is_schedule_z = args.vq_schedule_ratio > 0.
-        self.z_sampler = ReferenceSampler(
-            num_mode="adaptive", sub_mode="schedule")
+        self.vq_schedule_ratio = args.vq_schedule_ratio
+        self.is_schedule_z = self.vq_schedule_ratio > 0.
+        self.z_sampler = ReferenceSampler(num_mode="adaptive", sub_mode="schedule")
 
     @staticmethod
-    def add_args(parser):
+    def add_args(parser, key=None):
         # for vector quantization
+        parser.add_argument("--num-codes", type=int)
+        parser.add_argument("--lamda", type=float, default=0.999,
+                            help="use for exponential moving average")
         parser.add_argument("--vq-ema", action="store_true")
         parser.add_argument("--vq-dropout", type=float)
         parser.add_argument("--vq-share-input-output-embed", action="store_true", default=False)
         parser.add_argument("--vq-schedule-ratio", type=float, default=0.0)
-        parser.add_argument("--num-codes", type=int)
-        parser.add_argument("--lamda", type=float, default=0.999,
-                            help="use for exponential moving average")
 
         # parameter for predictor
-        parser.add_argument("--share-bottom-layers", action="store_true",
-                            help="share bottom layer of NAT decoder and latent decoder")
+        parser.add_argument(
+            "--share-bottom-layers", action="store_true", help="share bottom layer of NAT decoder and latent decoder"
+        )
         parser.add_argument("--vq-self-attn-cls", type=str)
         parser.add_argument("--vq-block-cls", type=str)
         parser.add_argument("--crf-cls", type=str)
@@ -104,13 +105,13 @@ class QuantizeNATDecoder(VNATDecoder):
     def forward_latent(self, encoder_out, tgt_tokens=None, inputs=None, decoder_padding_mask=None, **unused):
         if tgt_tokens is not None:
             # vector quantization from the reference --- non-parameter posterior
-            inference_out, idx = self._inference_z(inputs, decoder_padding_mask, tgt_tokens)
+            inference_out, idx = self._quantize_z(inputs, decoder_padding_mask, tgt_tokens)
         else:
             inference_out, idx = None, None
 
         if self.prior is None:
             # non-parameterize predictor, nearest search with decoder inputs
-            predict_out, idx = self._inference_z(inputs, decoder_padding_mask)
+            predict_out, idx = self._quantize_z(inputs, decoder_padding_mask)
         else:
             # parameterize predictor, we use NAT-CRF here.
             predict_out, idx = self._predict_z(inputs, decoder_padding_mask, encoder_out, tgt=idx, out=inference_out)
@@ -118,11 +119,12 @@ class QuantizeNATDecoder(VNATDecoder):
         if inference_out is not None:
             q = predict_out["z_inputs"]
         else:
-            q = self.posterior.forward(indices=idx)
+            q = self.posterior(indices=idx)
 
         return q, {GlobalNames.PRI_RET: predict_out, GlobalNames.POST_RET: inference_out}
 
-    def _inference_z(self, inputs, decoder_padding_mask, tgt_tokens=None):
+    def _quantize_z(self, inputs, decoder_padding_mask, tgt_tokens=None):
+        """ vector quantization for Z"""
         if tgt_tokens is not None:
             inputs = self.forward_embedding(tgt_tokens, add_position=False)[0]
 
@@ -138,28 +140,35 @@ class QuantizeNATDecoder(VNATDecoder):
 
     def _predict_z(self, inputs, decoder_padding_mask, encoder_out, tgt=None, out=None):
         """ predict the latent variables """
-        outputs, ret = self.prior.forward(
+        outputs, ret = self.prior(
             inputs=inputs,
             decoder_padding_mask=decoder_padding_mask,
             encoder_out=encoder_out,
             tgt_tokens=tgt,
             include_pos=self.args.self_attn_cls != "shaw"
         )
-        pred_embed = self.posterior.forward(indices=outputs.token)
-        if self.is_schedule_z and out is not None:
-            ref_embed = out["code_st"]
-            sample = self.sampler.forward(
-                targets=out["tgt"],
-                padding_mask=~out["mask"],
-                ratio=self.args.vq_schedule_ratio,
-                logits=ret["out"]
-            )
-            observed = sample.float().unsqueeze(-1)
-            z_inputs = self.sampler.substitution(
-                inputs=inputs, ref=ref_embed, observed=observed, pred=pred_embed
-            )
-        else:
-            z_inputs = pred_embed
+        pred_embed = self.posterior(indices=outputs.token)
+        z_inputs = pred_embed
+        if out is not None:
+            if self.is_schedule_z:
+                ref_embed = out["code_st"]
+                sample = self.z_sampler.forward_sampling(
+                    targets=tgt,
+                    padding_mask=decoder_padding_mask,
+                    ratio=self.vq_schedule_ratio,
+                    logits=ret["out"],
+                    s_mode="mixing"
+                )
+                observed = sample.float().unsqueeze(-1)
+                z_inputs = self.z_sampler.forward_inputs(
+                    inputs=inputs,
+                    ref=ref_embed,
+                    observed=observed,
+                    pred=pred_embed,
+                    s_mode="schedule"
+                )
+            else:
+                z_inputs = out["code_st"]
 
         ret["z_inputs"] = z_inputs
         return ret, outputs.token
@@ -185,7 +194,7 @@ class QuantizeNATDecoder(VNATDecoder):
             args,
             dictionary=Dictionary(num_codes=args.num_codes),
             embed_tokens=self.posterior.embedding if args.share_decoder_input_output_embed else nn.Embedding(
-                num_embeddings=args.num_codes, embedding_dim=args.decoder_embed_dim, padding_idx=None
+                num_embeddings=args.num_codes, embedding_dim=args.decoder_embed_dim, padding_idx=-1
             ),
             no_encoder_attn=False
         )
@@ -210,7 +219,7 @@ class Code(nn.Module):
         return embed
 
     def update_code(self, posterior):
-        pass
+        raise NotImplementedError
 
 
 class EMACode(Code):

@@ -1,10 +1,13 @@
+import random
+
 import torch
 import torch.nn.functional as F
+from fairseq import utils
 from fairseq.models import register_model, register_model_architecture
 from fairseq.modules.transformer_sentence_encoder import init_bert_params
 
 from latent_nat.awesome_nat import AwesomeNAT, NATDecoder, ensemble_decoder
-from latent_nat.utils import StepAnnealScheduler, GlobalNames, ReferenceSampler
+from latent_nat.utils import GlobalNames
 
 
 @register_model("glat")
@@ -33,7 +36,6 @@ class GlancingTransformer(AwesomeNAT):
         return self._compute_loss(word_ins_out, tgt_tokens, encoder_out, inner_states)
 
     def model_step_update(self, step_num):
-
         """ interface for applying the step schedule """
         self.decoder.step(step_num)
 
@@ -64,24 +66,32 @@ class GlancingTransformerDecoder(NATDecoder):
 
         # hyper-parameter
         self.teaching_mode = args.teaching_mode
-        self.glat_training = self.teaching_mode is not None
-        if self.glat_training and self.training:
-            print("Training Mode: {}".format(args.teaching_mode))
-
-        self.sampler = ReferenceSampler(num_mode=args.glancing_num_mode, sub_mode=args.glancing_sub_mode)
-        self.ratio_scheduler = StepAnnealScheduler(args)
+        self.glat_training = getattr(self, "teaching_mode", "schedule") == "glancing"
+        self.y_sampler = ReferenceSampler(num_mode=args.glancing_num_mode, sub_mode=args.glancing_sub_mode)
+        self.y_ratio_scheduler = StepAnnealScheduler(args)
 
     @staticmethod
-    def add_args(parser):
-        parser.add_argument("--teaching-mode", type=str, choices=["glancing", "schedule"], default=None)
-        parser.add_argument("--glancing-num-mode", type=str,
-                            choices=["fixed", "adaptive", "adaptive-uni", "adaptive-rev"],
-                            default="adaptive", help="glancing sampling number")
-        parser.add_argument("--glancing-sub-mode", type=str, choices=["uniform", "schedule"], default="uniform",
-                            help="uniform: mixing the decoder inputs and oracle, "
-                                 "schedule: mixing the predict and oracle")
-        # step annealing scheduler
-        StepAnnealScheduler.add_args(parser)
+    def add_args(parser, key=None):
+        if key is None:
+            parser.add_argument("--teaching-mode", type=str, choices=["glancing", "schedule"], default=None)
+            parser.add_argument("--glancing-num-mode", type=str,
+                                choices=["fixed", "adaptive", "adaptive-uni", "adaptive-rev"],
+                                default="adaptive", help="glancing sampling number")
+            parser.add_argument("--glancing-sub-mode", type=str, choices=["mixing", "schedule"],
+                                default="mixing", help="uniform: mixing the decoder inputs and oracle, "
+                                                       "schedule: mixing the predict and oracle")
+            # step annealing scheduler
+            StepAnnealScheduler.add_args(parser)
+        else:
+            parser.add_argument("--{}-teaching-mode".format(key), type=str, choices=["glancing", "schedule"],
+                                default=None)
+            parser.add_argument("--{}-glancing-num-mode".format(key), type=str,
+                                choices=["fixed", "adaptive", "adaptive-uni", "adaptive-rev"],
+                                default="adaptive", help="glancing sampling number")
+            parser.add_argument("--{}-glancing-sub-mode".format(key), type=str, choices=["mixing", "schedule"],
+                                default="mixing", help="uniform: mixing the decoder inputs and oracle, "
+                                                       "schedule: mixing the predict and oracle")
+            StepAnnealScheduler.add_args(parser, key)
 
     @ensemble_decoder
     def forward(self, normalize, encoder_out, prev_output_tokens, step=0, tgt_tokens=None, **unused):
@@ -106,24 +116,26 @@ class GlancingTransformerDecoder(NATDecoder):
         prob, predict = logits.max(dim=-1)
         pred_embed = self.forward_embedding(predict)[0]
 
-        sample = self.sampler.forward(targets=targets, padding_mask=mask, ratio=ratio, logits=logits)
+        sample = self.y_sampler.forward_sampling(targets=targets, padding_mask=mask, ratio=ratio, logits=logits)
         observed = sample.float().unsqueeze(-1)
         ref_embed = self.forward_embedding(targets)[0]
 
-        decode_inputs = self.sampler.substitution(
+        decode_inputs = self.y_sampler.forward_inputs(
             inputs=inputs, ref=ref_embed, observed=observed, pred=pred_embed, s_mode=kwargs.get("s_mode", None)
         )
         return decode_inputs, predict, observed
 
     def _extract_features(
             self,
-            x, decoder_padding_mask,
+            x,
+            decoder_padding_mask,
             pos=None,
             encoder_out=None,
             early_exit=None,
             tgt_tokens=None,
             **unused
     ):
+        """ including two decoding passes while training with glancing sampling """
         if tgt_tokens is not None and self.glat_training and self.training:
             # Glancing Training
             # first decoding pass
@@ -148,10 +160,12 @@ class GlancingTransformerDecoder(NATDecoder):
             features, ret = self._forward_decoding(x, decoder_padding_mask, encoder_out, early_exit)
             ret[GlobalNames.INPUT] = x
             ret[GlobalNames.FEATURES] = features
+            ret[GlobalNames.GLANCING_MASK] = decoder_padding_mask
             return features, ret
 
     def _forward_decoding(self, x, decoder_padding_mask, encoder_out=None, early_exit=None):
-        """ Transformer decoding function: computing hidden states given encoder outputs and decoder inputs """
+        """ One decoding pass with x & enc outputs
+         Transformer decoding function: computing hidden states given encoder outputs and decoder inputs """
         x = x.transpose(0, 1)
         attn = None
         inner_states = [x]
@@ -181,11 +195,125 @@ class GlancingTransformerDecoder(NATDecoder):
 
     def step(self, step_num):
         """ update the glancing ratio """
-        self.ratio_scheduler.forward(step_num)
+        self.y_ratio_scheduler.forward(step_num)
 
     @property
     def sampling_ratio(self):
-        return self.ratio_scheduler.ratio
+        return self.y_ratio_scheduler.ratio
+
+
+class StepAnnealScheduler(object):
+    """
+    Annealing for glancing ratio
+    """
+
+    def __init__(self, args, key=""):
+        super().__init__()
+        self.start_ratio = getattr(args, "{}_start_ratio".format(key), args.start_ratio)
+        self.end_ratio = getattr(args, "{}_end_ratio".format(key), args.end_ratio)
+        self.anneal_steps = getattr(args, "{}_anneal_steps".format(key), args.anneal_steps)
+        self.anneal_start = getattr(args, "{}_anneal_start".format(key), args.anneal_start)
+
+        self.anneal_end = self.anneal_start + self.anneal_steps
+        self.step_ratio = (self.end_ratio - self.start_ratio) / self.anneal_steps
+
+        self._ratio = self.start_ratio
+
+    @staticmethod
+    def add_args(parser, key=None):
+        # step annealing scheduler
+        if key is None or len(key) < 1:
+            parser.add_argument("--start-ratio", type=float, default=0.5)
+            parser.add_argument("--end-ratio", type=float, default=0.5)
+            parser.add_argument("--anneal-steps", type=int, default=1)
+            parser.add_argument("--anneal-start", type=int, default=300000)
+        else:
+            parser.add_argument("--{}-start-ratio".format(key), type=float, default=0.5)
+            parser.add_argument("--{}-end-ratio".format(key), type=float, default=0.5)
+            parser.add_argument("--{}-anneal-steps".format(key), type=int, default=1)
+            parser.add_argument("--{}-anneal-start".format(key), type=int, default=300000)
+
+    def forward(self, step_num):
+        if step_num < self.anneal_start:
+            return self.start_ratio
+        elif step_num >= self.anneal_end:
+            return self.end_ratio
+        else:
+            self._ratio = self.start_ratio + self.step_ratio * (step_num - self.anneal_start)
+            return self._ratio
+
+    @property
+    def ratio(self):
+        return self._ratio
+
+
+class ReferenceSampler(object):
+    def __init__(self, num_mode, sub_mode):
+        super().__init__()
+        self.num_mode = num_mode  # compute substitution number
+        self.sub_mode = sub_mode  # substitution mode
+
+    def forward_sampling(self, targets, padding_mask, ratio=0.5, logits=None, n_mode=None, s_mode=None):
+        return glancing_sampling(
+            targets=targets, padding_mask=padding_mask, ratio=ratio, logits=logits,
+            n_mode=self.num_mode if n_mode is None else n_mode,
+            s_mode=self.sub_mode if s_mode is None else s_mode
+        )
+
+    def forward_inputs(self, inputs, ref, observed, pred=None, s_mode=None):
+        s_mode = self.sub_mode if s_mode is None else s_mode
+
+        if s_mode == "schedule":
+            assert pred is not None, "schedule needs prediction"
+            inputs = pred
+        return (1 - observed) * inputs + observed * ref
+
+
+def glancing_sampling(targets, padding_mask, ratio=0.5, logits=None, n_mode="adaptive", s_mode="mixing"):
+    """return the positions to be replaced """
+    if n_mode == "fixed":
+        number = targets.size(1) * ratio + 1
+    elif n_mode == "adaptive":
+        # E * f_ratio: Qian et al. ACL 2021
+        assert logits is not None, "logits should not be None"
+        predict = logits.max(dim=-1)[1]
+        distance = (predict.ne(targets) * ~padding_mask).float().sum(dim=-1)
+        number = distance * ratio + 1
+    elif n_mode == "adaptive-uni":
+        # E * random ratio: Uniform sampling ratio for the model.
+        assert logits is not None, "logits should not be None"
+        ratio = random.random()
+        predict = logits.max(dim=-1)[1]
+        distance = (predict.ne(targets) * ~padding_mask).float().sum(dim=-1)
+        number = distance * ratio + 1
+    elif n_mode == "adaptive-rev":
+        # E * (1-E/N): The more predicting error, the more sampling token
+        predict = logits.max(dim=-1)[1]
+        distance = (predict.ne(targets) * ~padding_mask).float().sum(dim=-1)
+        ratio = 1.0 - distance / ((~padding_mask).float())
+        number = distance * ratio + 1
+    else:
+        number = None
+
+    score = targets.clone().float().uniform_()
+
+    if s_mode == "mixing":
+        # select replaced token from uniform distributions
+        assert number is not None, "number should be decided before sampling"
+        score.masked_fill_(padding_mask, 2.0)
+        rank = score.sort(1)[1]
+        cutoff = utils.new_arange(rank) < number[:, None].long()
+        sample = cutoff.scatter(1, rank, cutoff)  # batch_size, sequence_length
+    elif s_mode == "schedule":
+        # select the replaced token with its modeled y probability
+        assert logits is not None, "logits should not be None"
+        prob = logits.softmax(dim=-1)
+        ref_score = prob.view(-1, targets.size(-1)).contiguous().gather(1, targets.view(-1, 1)).view(*targets.size())
+        sample = score.lt(ref_score) * (~padding_mask)
+    else:
+        raise RuntimeWarning("sample is none")
+
+    return sample
 
 
 def base_architecture(args):

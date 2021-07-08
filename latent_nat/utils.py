@@ -1,9 +1,6 @@
-import random
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from fairseq import utils
 from fairseq.modules import (
     FairseqDropout,
     LayerDropModuleList,
@@ -34,119 +31,6 @@ class GlobalNames(object):
     PREDICTS = "predicts"  # prediction of decoder
     GLANCING_INPUTS = "glancing_inputs"
     GLANCING_MASK = "glancing_mask"
-
-
-class StepAnnealScheduler(object):
-    """
-    Annealing for glancing ratio
-    """
-
-    def __init__(self, args, key=""):
-        super().__init__()
-        self.start_ratio = getattr(args, "{}_start_ratio".format(key), args.start_ratio)
-        self.end_ratio = getattr(args, "{}_end_ratio".format(key), args.end_ratio)
-        self.anneal_steps = getattr(args, "{}_anneal_steps".format(key), args.anneal_steps)
-        self.anneal_start = getattr(args, "{}_anneal_start".format(key), args.anneal_start)
-
-        self.anneal_end = self.anneal_start + self.anneal_steps
-        self.step_ratio = (self.end_ratio - self.start_ratio) / self.anneal_steps
-
-        self._ratio = self.start_ratio
-
-    @staticmethod
-    def add_args(parser, key=None):
-        # step annealing scheduler
-        if key is None or len(key) < 1:
-            parser.add_argument("--start-ratio", type=float, default=0.5)
-            parser.add_argument("--end-ratio", type=float, default=0.5)
-            parser.add_argument("--anneal-steps", type=int, default=1)
-            parser.add_argument("--anneal-start", type=int, default=300000)
-        else:
-            parser.add_argument("--{}-start-ratio".format(key), type=float, default=0.5)
-            parser.add_argument("--{}-end-ratio".format(key), type=float, default=0.5)
-            parser.add_argument("--{}-anneal-steps".format(key), type=int, default=1)
-            parser.add_argument("--{}-anneal-start".format(key), type=int, default=300000)
-
-    def forward(self, step_num):
-        if step_num < self.anneal_start:
-            return self.start_ratio
-        elif step_num >= self.anneal_end:
-            return self.end_ratio
-        else:
-            self._ratio = self.start_ratio + self.step_ratio * (step_num - self.anneal_start)
-            return self._ratio
-
-    @property
-    def ratio(self):
-        return self._ratio
-
-
-class ReferenceSampler(object):
-    def __init__(self, num_mode, sub_mode):
-        super().__init__()
-        self.num_mode = num_mode  # compute substitution number
-        self.sub_mode = sub_mode  # substitution mode
-
-    def forward(self, targets, padding_mask, ratio=0.5, logits=None):
-        return glancing_sampling(
-            targets=targets, padding_mask=padding_mask, ratio=ratio, logits=logits, n_mode=self.num_mode,
-            s_mode=self.sub_mode
-        )
-
-    def substitution(self, inputs, ref, observed, pred=None, s_mode=None):
-        s_mode = self.sub_mode if s_mode is None else s_mode
-
-        if s_mode == "schedule":
-            assert pred is not None, "schedule needs prediction"
-            inputs = pred
-        return (1 - observed) * inputs + observed * ref
-
-
-def glancing_sampling(targets, padding_mask, ratio=0.5, logits=None, n_mode="adaptive", s_mode="uniform"):
-    """return the positions to be replaced """
-    if n_mode == "fixed":
-        number = targets.size(1) * ratio + 1
-    elif n_mode == "adaptive":
-        # E * f_ratio: Qian et al. ACL 2021
-        assert logits is not None, "logits should not be None"
-        predict = logits.max(dim=-1)[1]
-        distance = (predict.ne(targets) * ~padding_mask).float().sum(dim=-1)
-        number = distance * ratio + 1
-    elif n_mode == "adaptive-uni":
-        # E * random ratio: Uniform sampling ratio for the model.
-        assert logits is not None, "logits should not be None"
-        ratio = random.random()
-        predict = logits.max(dim=-1)[1]
-        distance = (predict.ne(targets) * ~padding_mask).float().sum(dim=-1)
-        number = distance * ratio + 1
-    elif n_mode == "adaptive-rev":
-        # E * (1-E/N): The more predicting error, the more sampling token
-        predict = logits.max(dim=-1)[1]
-        distance = (predict.ne(targets) * ~padding_mask).float().sum(dim=-1)
-        ratio = 1.0 - distance / ((~padding_mask).float())
-        number = distance * ratio + 1
-    else:
-        number = None
-
-    score = targets.clone().float().uniform_()
-
-    if s_mode == "uniform":
-        # select replaced token from uniform distributions
-        assert number is not None, "number should be decided before sampling"
-        score.masked_fill_(padding_mask, 2.0)
-        rank = score.sort(1)[1]
-        cutoff = utils.new_arange(rank) < number[:, None].long()
-        sample = cutoff.scatter(1, rank, cutoff)  # batch_size, sequence_length
-    elif s_mode == "schedule":
-        # select the replaced token with its modeled y probability
-        assert logits is not None, "logits should not be None"
-        prob = logits.softmax(dim=-1)
-        ref_score = prob.view(-1, targets.size(-1)).contiguous().gather(1, targets.view(-1, 1)).view(*targets.size())
-        sample = score.lt(ref_score) * (~padding_mask)
-    else:
-        sample = None
-
-    return sample
 
 
 def reparameterize(mean, var, is_logv=False, sample_size=1):

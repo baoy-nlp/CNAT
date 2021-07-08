@@ -28,9 +28,16 @@ class CRFPredictor(NATDecoder):
     def preprocess(self, inputs, decoder_padding_mask, include_pos=False):
         if include_pos or self.args.self_attn_cls == "shaw":
             return inputs
-        mask = decoder_padding_mask.long()
-        pos_tokens = (mask * self.padding_idx) + (1 - mask) * (self.padding_idx + 1)
-        inputs = self.forward_embedding(prev_output_tokens=pos_tokens, states=inputs, add_position=True)[0]
+        if self.padding_idx is not None:
+            mask = decoder_padding_mask.long()
+            pos_tokens = (mask * self.padding_idx) + (1 - mask) * (self.padding_idx + 1)
+        else:
+            pos_tokens = (~decoder_padding_mask).long()
+        inputs = self.forward_embedding(
+            prev_output_tokens=pos_tokens,
+            states=inputs,
+            add_position=True
+        )[0]
         return inputs
 
     def forward(self, inputs, decoder_padding_mask, encoder_out=None, tgt_tokens=None, **unused):
