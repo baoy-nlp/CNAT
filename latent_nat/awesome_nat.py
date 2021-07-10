@@ -439,7 +439,7 @@ class NATEncoder(TransformerEncoder):
     def __init__(self, args, dictionary, embed_tokens):
         super().__init__(args, dictionary, embed_tokens)
         if getattr(args, "enc_self_attn_cls", "abs") != "abs":
-            self.embed_positions = None  # remove absolute position if we use relative positions
+            # self.embed_positions = None  # remove absolute position if we use relative positions
 
             if getattr(args, "share_rel_embeddings", False):
                 rel_keys = build_relative_embeddings(args)
@@ -557,14 +557,14 @@ class NATDecoder(NATransformerDecoder):
             encoder_out=encoder_out
         )
 
-        return self._extract_features(
+        return self.decode(
             x, decoder_padding_mask, pos,
             encoder_out=encoder_out,
             early_exit=early_exit,
             **unused
         )
 
-    def _extract_features(
+    def decode(
             self,
             x, decoder_padding_mask,
             pos=None,
@@ -666,7 +666,7 @@ class NATDecoder(NATransformerDecoder):
         if self.padding_idx is not None:
             decoder_padding_mask = prev_output_tokens.eq(self.padding_idx)
         else:
-            decoder_padding_mask = prev_output_tokens.eq(-1)
+            decoder_padding_mask = None
         return x, decoder_padding_mask, positions
 
     def forward_length_prediction(self, length_out, encoder_out, tgt_tokens=None, use_ref_len=False, beam_size=1):
