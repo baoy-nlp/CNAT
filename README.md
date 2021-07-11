@@ -16,7 +16,7 @@ Implementation of [Non-autoregressive Translation by Learning Target Categorical
 # Training scripts
 ```bash
 DATA_BIN=[PATH OF YOUR PROCESSED BIN] 
-USER_DIR=[path to cnat]
+USER_DIR=[path to latent_nat]
 SAVE_DIR=[PATH OF YOUR MODEL TARGET]
 LOG_DIR=[PATH OF YOUR LOG TARGET]
 
