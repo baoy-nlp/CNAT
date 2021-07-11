@@ -479,7 +479,7 @@ class NATDecoder(NATransformerDecoder):
         # attention selection
         self.layerwise_attn = args.layerwise_attn
         if getattr(args, "self_attn_cls", "abs") != "abs":
-            self.embed_positions = None  # remove absolute position if we use relative positions
+            # self.embed_positions = None  # remove absolute position if we use relative positions
 
             rel_keys = build_relative_embeddings(args) if getattr(args, "share_rel_embeddings", False) else None
             rel_vals = build_relative_embeddings(args) if getattr(args, "share_rel_embeddings", False) else None

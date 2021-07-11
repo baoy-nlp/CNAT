@@ -66,7 +66,7 @@ class GlancingTransformerDecoder(NATDecoder):
 
         # hyper-parameter
         self.teaching_mode = args.teaching_mode
-        self.glat_training = getattr(self, "teaching_mode", "schedule") == "glancing"
+        self.glat_training = getattr(self, "teaching_mode", "schedule") != "schedule"
         self.y_sampler = ReferenceSampler(num_mode=args.glancing_num_mode, sub_mode=args.glancing_sub_mode)
         self.y_ratio_scheduler = StepAnnealScheduler(args)
 
@@ -125,7 +125,7 @@ class GlancingTransformerDecoder(NATDecoder):
         )
         return decode_inputs, predict, observed
 
-    def _extract_features(
+    def decode(
             self,
             x,
             decoder_padding_mask,

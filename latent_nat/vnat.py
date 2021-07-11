@@ -93,7 +93,7 @@ class VNATDecoder(GlancingTransformerDecoder):
         parser.add_argument("--combine-func", type=str, default="residual")
         parser.add_argument("--use-scalar-gate", action="store_true", default=False)
 
-    def _extract_features(
+    def decode(
             self,
             x,
             decoder_padding_mask,
@@ -104,15 +104,14 @@ class VNATDecoder(GlancingTransformerDecoder):
             **unused,
     ):
 
-        z, z_ret = self.forward_latent(encoder_out, tgt_tokens, x, decoder_padding_mask=decoder_padding_mask)
+        z, z_ret = self.forward_latent(encoder_out, tgt_tokens, inputs=x, decoder_padding_mask=decoder_padding_mask)
 
         # integrating the latent variable information
         feats = self.forward_combine(x, z)
 
         if tgt_tokens is not None and self.glat_training and self.training:
             # Glancing Training
-            with torch.no_grad():
-                decoder_outputs, ret = self._forward_decoding(feats, decoder_padding_mask, encoder_out, early_exit)
+            decoder_outputs, ret = self._forward_decoding(feats, decoder_padding_mask, encoder_out, early_exit)
 
             # glancing for second pass
             glancing_inputs, predict, glancing_mask = self.glancing(

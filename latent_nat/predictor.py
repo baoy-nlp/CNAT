@@ -44,7 +44,7 @@ class CRFPredictor(NATDecoder):
         inputs = self.preprocess(
             inputs=inputs, decoder_padding_mask=decoder_padding_mask, include_pos=unused.get("include_pos", False)
         )
-        features, _ = self._extract_features(
+        features, _ = self.decode(
             x=inputs,
             decoder_padding_mask=decoder_padding_mask,
             encoder_out=encoder_out,

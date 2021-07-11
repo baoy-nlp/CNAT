@@ -2,9 +2,8 @@ import copy
 
 import torch
 import torch.nn as nn
-from fairseq.models import register_model, register_model_architecture
 
-from latent_nat.glat import ReferenceSampler
+from latent_nat.glat import ReferenceSampler, register_model, register_model_architecture
 from latent_nat.predictor import CRFPredictor
 from latent_nat.utils import GlobalNames
 from latent_nat.vector_quantization import vq_st, vq_search
@@ -149,8 +148,8 @@ class QuantizeNATDecoder(VNATDecoder):
         )
         pred_embed = self.posterior(indices=outputs.token)
         z_inputs = pred_embed
-        if out is not None:
-            if self.is_schedule_z:
+        if tgt is not None:
+            if self.is_schedule_z and self.training:
                 ref_embed = out["code_st"]
                 sample = self.z_sampler.forward_sampling(
                     targets=tgt,
@@ -165,7 +164,6 @@ class QuantizeNATDecoder(VNATDecoder):
                     ref=ref_embed,
                     observed=observed,
                     pred=pred_embed,
-                    s_mode="schedule"
                 )
             else:
                 z_inputs = out["code_st"]
@@ -174,8 +172,7 @@ class QuantizeNATDecoder(VNATDecoder):
         return ret, outputs.token
 
     def _build_posterior(self):
-        model_args = self.args
-        args = copy.deepcopy(model_args)
+        args = self.args
         code: EMACode = EMACode(num_codes=args.num_codes, code_dim=args.decoder_embed_dim, lamda=args.lamda)
         return code
 
@@ -263,6 +260,8 @@ class EMACode(Code):
         enc = enc.view(-1, enc.size(-1))
         idx = idx.view(-1)
         z_exp = []
+
+        # TODO: to batchify the EMA algorithms
         for i in range(self.K):
             i_hit = idx == i  # batch_size*sequence_length,1
             self.code_count[i] = self.lamda * self.code_count[i] + i_hit.sum().float() * (1 - self.lamda)

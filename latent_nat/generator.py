@@ -117,6 +117,9 @@ class NAGenerator(IterativeRefinementGenerator):
         tgt_tokens = sample["target"] if "target" in sample and (
                 self.infer_with_tgt or self.infer_with_reflen) else None
 
+        if not model.training and tgt_tokens is not None:
+            raise RuntimeWarning("tgt tokens is access while evaluating the mode")
+
         # beam_already = hasattr(model, "initialize_beam_output_tokens")
         beam_already = False
         init_func = model.initialize_output_tokens if not beam_already else model.initialize_beam_output_tokens
